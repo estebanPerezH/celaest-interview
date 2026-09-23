@@ -13,7 +13,7 @@ const DEFAULT_CONFIG = {
     groqModel: 'qwen/qwen3.8-27b',
     groqImageModel: 'qwen/qwen3.8-27b',
     disableGroqThinking: true,
-    celaestCoreUrl: 'http://127.0.0.1:8085',
+    celaestCoreUrl: 'https://celaest-core.onrender.com',
     useCelaestCore: true,
 };
 
@@ -174,6 +174,9 @@ function getConfig() {
     }
     if (!config.groqImageModel || config.groqImageModel.includes('qwen3.6') || config.groqImageModel.includes('llama-3.2') || config.groqImageModel.includes('llama-3.3')) {
         config.groqImageModel = 'qwen/qwen3.8-27b';
+    }
+    if (!config.celaestCoreUrl || config.celaestCoreUrl === 'http://127.0.0.1:8085' || config.celaestCoreUrl === 'http://localhost:8085') {
+        config.celaestCoreUrl = 'https://celaest-core.onrender.com';
     }
     if (process.env.CELAEST_CORE_URL) {
         config.celaestCoreUrl = process.env.CELAEST_CORE_URL;
