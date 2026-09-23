@@ -175,6 +175,9 @@ function getConfig() {
     if (!config.groqImageModel || config.groqImageModel.includes('qwen3.6') || config.groqImageModel.includes('llama-3.2') || config.groqImageModel.includes('llama-3.3')) {
         config.groqImageModel = 'qwen/qwen3.8-27b';
     }
+    if (process.env.CELAEST_CORE_URL) {
+        config.celaestCoreUrl = process.env.CELAEST_CORE_URL;
+    }
     return config;
 }
 
