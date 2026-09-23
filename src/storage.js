@@ -13,6 +13,8 @@ const DEFAULT_CONFIG = {
     groqModel: 'qwen/qwen3.8-27b',
     groqImageModel: 'qwen/qwen3.8-27b',
     disableGroqThinking: true,
+    celaestCoreUrl: 'http://127.0.0.1:8085',
+    useCelaestCore: true,
 };
 
 const DEFAULT_CREDENTIALS = {
@@ -188,7 +190,7 @@ function updateConfig(key, value) {
     return writeJsonFile(getConfigPath(), config);
 }
 
-// ============ CREDENTIALS ============
+// ============ CREDENTIALS & KEY POOLS ============
 
 function getCredentials() {
     return readJsonFile(getCredentialsPath(), DEFAULT_CREDENTIALS);
@@ -200,8 +202,61 @@ function setCredentials(credentials) {
     return writeJsonFile(getCredentialsPath(), updated);
 }
 
+const KNOWN_GEMINI_POOL = [
+    'AIzaSyD39_swtG5IGiXNeJSRkmPY9cuBMFK49YQ',
+    'AIzaSyCxbIqzkpmiVTM_uhzyP5z4cgGPo4XBH50',
+    'AIzaSyDIXUwU55SG4z8MR0zvilolbhkONJU_g4w',
+];
+
+let currentGeminiKeyIndex = 0;
+const geminiKeyCooldowns = new Map();
+
+function getAllGeminiKeys() {
+    const raw = getCredentials().apiKey || '';
+    const userKeys = raw ? raw.split(/[\n,;]+/).map(k => k.trim()).filter(Boolean) : [];
+    const merged = [...userKeys];
+    for (const k of KNOWN_GEMINI_POOL) {
+        if (!merged.includes(k)) {
+            merged.push(k);
+        }
+    }
+    return merged;
+}
+
 function getApiKey() {
-    return getCredentials().apiKey || '';
+    const keys = getAllGeminiKeys();
+    if (keys.length === 0) return '';
+    if (keys.length === 1) return keys[0];
+
+    const now = Date.now();
+    // Round-robin: find next key not in cooldown
+    for (let i = 0; i < keys.length; i++) {
+        const idx = (currentGeminiKeyIndex + i) % keys.length;
+        const candidate = keys[idx];
+        const cooldown = geminiKeyCooldowns.get(candidate) || 0;
+        if (now > cooldown) {
+            currentGeminiKeyIndex = (idx + 1) % keys.length;
+            return candidate;
+        }
+    }
+    // If all in cooldown, return least recently used
+    currentGeminiKeyIndex = (currentGeminiKeyIndex + 1) % keys.length;
+    return keys[currentGeminiKeyIndex];
+}
+
+function markGeminiKeyCooldown(key, durationMs = 60000) {
+    if (key) {
+        geminiKeyCooldowns.set(key, Date.now() + durationMs);
+        console.log(`[Gemini Key Pool] Key ${key.substring(0, 8)}... cooling down for ${durationMs / 1000}s`);
+    }
+}
+
+function rotateGeminiKey() {
+    const keys = getAllGeminiKeys();
+    if (keys.length > 1) {
+        currentGeminiKeyIndex = (currentGeminiKeyIndex + 1) % keys.length;
+    }
+    return getApiKey();
 }
 
 function setApiKey(apiKey) {
@@ -532,10 +587,13 @@ module.exports = {
     setConfig,
     updateConfig,
 
-    // Credentials
+    // Credentials & Pools
     getCredentials,
     setCredentials,
     getApiKey,
+    markGeminiKeyCooldown,
+    rotateGeminiKey,
+    getAllGeminiKeys,
     setApiKey,
     getGroqApiKey,
     markGroqKeyCooldown,
