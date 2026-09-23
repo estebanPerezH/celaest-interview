@@ -3,7 +3,7 @@ const { BrowserWindow, ipcMain } = require('electron');
 const { spawn } = require('child_process');
 const { saveDebugAudio } = require('../audioUtils');
 const { getSystemPrompt } = require('./prompts');
-const { getAvailableModel, incrementLimitCount, getApiKey, getGroqApiKey, incrementCharUsage, getConfig } = require('../storage');
+const { getAvailableModel, incrementLimitCount, getApiKey, getGroqApiKey, markGroqKeyCooldown, incrementCharUsage, getConfig } = require('../storage');
 const { connectCloud, sendCloudAudio, sendCloudText, sendCloudImage, closeCloud, isCloudActive, setOnTurnComplete } = require('./cloud');
 const { startTransportLog, logTransportEvent, closeTransportLog } = require('./transportLogger');
 
@@ -51,6 +51,19 @@ let groqRequestStartedForTurn = false;
 const GROQ_MAX_COMPLETION_TOKENS = 16384;
 const GROQ_EMPTY_RESPONSE_MESSAGE =
     'Groq reached the maximum completion-token limit before returning a final answer. Disable thinking in Home → AI responses and try again.';
+
+// Groq rate limit throttle variables
+let lastGroqRequestTime = 0;
+const MIN_GROQ_INTERVAL_MS = 2000;
+
+async function throttleGroq() {
+    const now = Date.now();
+    const elapsed = now - lastGroqRequestTime;
+    if (elapsed < MIN_GROQ_INTERVAL_MS) {
+        await new Promise(r => setTimeout(r, MIN_GROQ_INTERVAL_MS - elapsed));
+    }
+    lastGroqRequestTime = Date.now();
+}
 
 // Reconnection variables
 let isUserClosing = false;
@@ -158,8 +171,8 @@ function getCurrentSessionData() {
 async function getEnabledTools() {
     const tools = [];
 
-    // Check if Google Search is enabled (default: true)
-    const googleSearchEnabled = await getStoredSetting('googleSearchEnabled', 'true');
+    // Check if Google Search is enabled (default: false to preserve quota)
+    const googleSearchEnabled = await getStoredSetting('googleSearchEnabled', 'false');
     console.log('Google Search enabled:', googleSearchEnabled);
 
     if (googleSearchEnabled === 'true') {
@@ -272,6 +285,46 @@ function getGroqReasoningOptions(model, disableThinking) {
     return {};
 }
 
+async function sendTextToGeminiHttp(transcription) {
+    const apiKey = getApiKey();
+    if (!apiKey) return false;
+    try {
+        const ai = new GoogleGenAI({ apiKey: apiKey });
+        console.log('Falling back to Gemini 3.6 Flash for text answer...');
+        sendToRenderer('interviewer-question', {
+            type: 'interviewer',
+            content: transcription.trim(),
+            timestamp: Date.now(),
+        });
+        const response = await ai.models.generateContentStream({
+            model: 'gemini-3.6-flash',
+            contents: [
+                { text: (currentSystemPrompt || 'You are an interview assistant.') + '\n\nCRITICAL MANDATE: Answer strictly in natural, credible B1-level English. Keep it human, conversational, and direct. Solve the problem practically without stiff academic or robotic vocabulary. Never use Spanish.\n\n[Interviewer asks]: ' + transcription },
+            ],
+        });
+
+        let fullText = '';
+        let isFirst = true;
+        for await (const chunk of response) {
+            const chunkText = chunk.text;
+            if (chunkText) {
+                fullText += chunkText;
+                sendToRenderer(isFirst ? 'new-response' : 'update-response', fullText);
+                isFirst = false;
+            }
+        }
+
+        if (fullText) {
+            saveConversationTurn(transcription, fullText);
+        }
+        sendToRenderer('update-status', 'Listening...');
+        return true;
+    } catch (e) {
+        console.error('Gemini text fallback error:', e.message);
+        return false;
+    }
+}
+
 async function sendToGroq(transcription) {
     const groqApiKey = getGroqApiKey();
     if (!groqApiKey) {
@@ -285,12 +338,21 @@ async function sendToGroq(transcription) {
     }
 
     const config = getConfig();
-    const modelToUse = config.groqModel;
+    let modelToUse = config.groqModel || 'qwen/qwen3.8-27b';
+    if (!modelToUse || modelToUse.includes('qwen3.6') || modelToUse.includes('llama-3.2') || modelToUse.includes('llama-3.3')) {
+        modelToUse = 'qwen/qwen3.8-27b';
+    }
 
     console.log(`Sending to Groq (${modelToUse}):`, transcription.substring(0, 100) + '...');
     logTransportEvent('groq.text.request', {
         model: modelToUse,
         transcription,
+    });
+
+    sendToRenderer('interviewer-question', {
+        type: 'interviewer',
+        content: transcription.trim(),
+        timestamp: Date.now(),
     });
 
     groqConversationHistory.push({
@@ -302,8 +364,11 @@ async function sendToGroq(transcription) {
         groqConversationHistory = groqConversationHistory.slice(-20);
     }
 
+    const groqSystemPrompt = (currentSystemPrompt || 'You are an interview assistant.') + '\n\nCRITICAL MANDATE: You MUST answer strictly in natural, conversational B1-level English. Keep it human, clear, and believable. Solve the problem directly and practically without robotic or academic vocabulary. Never output Spanish.';
+
     try {
-        const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+        await throttleGroq();
+        let response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
             method: 'POST',
             headers: {
                 Authorization: `Bearer ${groqApiKey}`,
@@ -311,7 +376,7 @@ async function sendToGroq(transcription) {
             },
             body: JSON.stringify({
                 model: modelToUse,
-                messages: [{ role: 'system', content: currentSystemPrompt || 'You are a helpful assistant.' }, ...groqConversationHistory],
+                messages: [{ role: 'system', content: groqSystemPrompt }, ...groqConversationHistory],
                 stream: true,
                 temperature: 0.7,
                 max_completion_tokens: GROQ_MAX_COMPLETION_TOKENS,
@@ -319,14 +384,43 @@ async function sendToGroq(transcription) {
             }),
         });
 
+        // Auto-retry once on 429 (rate limit) with 2.5s backoff
+        if (response.status === 429) {
+            console.warn('Groq 429 rate limit hit, backing off 2.5s and retrying...');
+            sendToRenderer('update-status', 'Rate limit pause (retrying in 2s)...');
+            await new Promise(r => setTimeout(r, 2500));
+            response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+                method: 'POST',
+                headers: {
+                    Authorization: `Bearer ${groqApiKey}`,
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    model: modelToUse,
+                    messages: [{ role: 'system', content: currentSystemPrompt || 'You are a helpful assistant.' }, ...groqConversationHistory],
+                    stream: true,
+                    temperature: 0.7,
+                    max_completion_tokens: GROQ_MAX_COMPLETION_TOKENS,
+                    ...getGroqReasoningOptions(modelToUse, config.disableGroqThinking),
+                }),
+            });
+        }
+
         if (!response.ok) {
+            if (response.status === 429) {
+                markGroqKeyCooldown(groqApiKey, 60000);
+            }
             const errorText = await response.text();
             console.error('Groq API error:', response.status, errorText);
             logTransportEvent('groq.text.http_error', {
                 status: response.status,
                 body: errorText,
             });
-            sendToRenderer('update-status', `Groq error: ${response.status}`);
+            // Silent instant fallback to Gemini 3.6 Flash so the candidate NEVER gets blocked in an interview
+            const fallbackSuccess = await sendTextToGeminiHttp(transcription);
+            if (!fallbackSuccess) {
+                sendToRenderer('update-status', 'Listening...');
+            }
             return;
         }
 
@@ -424,7 +518,10 @@ async function sendToGroq(transcription) {
 async function sendImageToGroq(base64Data, prompt) {
     const groqApiKey = getGroqApiKey();
     const config = getConfig();
-    const model = config.groqImageModel;
+    let model = config.groqImageModel || 'qwen/qwen3.8-27b';
+    if (!model || model.includes('qwen3.6') || model.includes('llama-3.2') || model.includes('llama-3.3')) {
+        model = 'qwen/qwen3.8-27b';
+    }
 
     logTransportEvent('groq.image.request', {
         model,
@@ -433,7 +530,8 @@ async function sendImageToGroq(base64Data, prompt) {
     });
 
     try {
-        const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+        await throttleGroq();
+        let response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
             method: 'POST',
             headers: {
                 Authorization: `Bearer ${groqApiKey}`,
@@ -442,7 +540,10 @@ async function sendImageToGroq(base64Data, prompt) {
             body: JSON.stringify({
                 model,
                 messages: [
-                    { role: 'system', content: currentSystemPrompt || 'You are a helpful assistant.' },
+                    {
+                        role: 'system',
+                        content: (currentSystemPrompt || 'You are an interview assistant.') + '\n\nCRITICAL MANDATE: Answer and explain strictly in natural, credible B1-level English. Keep it conversational, practical, and clear. Avoid robotic or academic words. Never output Spanish.',
+                    },
                     {
                         role: 'user',
                         content: [
@@ -463,14 +564,52 @@ async function sendImageToGroq(base64Data, prompt) {
             }),
         });
 
+        // Auto-retry once on 429
+        if (response.status === 429) {
+            console.warn('Groq image 429 hit, retrying in 2.5s...');
+            await new Promise(r => setTimeout(r, 2500));
+            response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+                method: 'POST',
+                headers: {
+                    Authorization: `Bearer ${groqApiKey}`,
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    model,
+                    messages: [
+                        { role: 'system', content: currentSystemPrompt || 'You are a helpful assistant.' },
+                        {
+                            role: 'user',
+                            content: [
+                                { type: 'text', text: prompt },
+                                {
+                                    type: 'image_url',
+                                    image_url: {
+                                        url: `data:image/jpeg;base64,${base64Data}`,
+                                    },
+                                },
+                            ],
+                        },
+                    ],
+                    stream: true,
+                    temperature: 0.7,
+                    max_completion_tokens: GROQ_MAX_COMPLETION_TOKENS,
+                    ...getGroqReasoningOptions(model, config.disableGroqThinking),
+                }),
+            });
+        }
+
         if (!response.ok) {
+            if (response.status === 429) {
+                markGroqKeyCooldown(groqApiKey, 60000);
+            }
             const errorText = await response.text();
             console.error('Groq image API error:', response.status, errorText);
             logTransportEvent('groq.image.http_error', {
                 status: response.status,
                 body: errorText,
             });
-            return { success: false, error: `Groq error: ${response.status}` };
+            return { success: false, error: response.status === 429 ? 'Rate limited' : `Groq error: ${response.status}` };
         }
 
         logTransportEvent('groq.image.http_response', {
@@ -1012,7 +1151,7 @@ async function sendImageToGeminiHttp(base64Data, prompt) {
                     data: base64Data,
                 },
             },
-            { text: prompt },
+            { text: prompt + '\n\nCRITICAL MANDATE: Answer and provide talking points strictly in natural, credible B1-level English. Keep it conversational, practical, and clear. Avoid stiff academic words. Never use Spanish.' },
         ];
 
         console.log(`Sending image to ${model} (streaming)...`);
@@ -1197,7 +1336,16 @@ function setupGeminiIpcHandlers(geminiSessionRef) {
                 return result;
             }
 
-            const result = hasGroqKey() ? await sendImageToGroq(data, prompt) : await sendImageToGeminiHttp(data, prompt);
+            let result = null;
+            if (hasGroqKey()) {
+                result = await sendImageToGroq(data, prompt);
+                if (!result || !result.success) {
+                    console.log('Groq image rate-limited or failed, falling back to Gemini 3.6 Flash...');
+                    result = await sendImageToGeminiHttp(data, prompt);
+                }
+            } else {
+                result = await sendImageToGeminiHttp(data, prompt);
+            }
             return result;
         } catch (error) {
             console.error('Error sending image:', error);

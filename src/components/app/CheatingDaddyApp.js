@@ -471,6 +471,17 @@ export class CheatingDaddyApp extends LitElement {
             ipcRenderer.on('new-response', (_, response) => this.addNewResponse(response));
             ipcRenderer.on('update-response', (_, response) => this.updateCurrentResponse(response));
             ipcRenderer.on('update-status', (_, status) => this.setStatus(status));
+            ipcRenderer.on('interviewer-question', (_, data) => {
+                const content = typeof data === 'string' ? data : (data?.content || data?.text);
+                if (content && content.trim()) {
+                    this.addNewResponse({
+                        id: 'interviewer-' + Date.now(),
+                        type: 'interviewer',
+                        content: content.trim(),
+                        timestamp: data?.timestamp || Date.now(),
+                    });
+                }
+            });
             ipcRenderer.on('click-through-toggled', (_, isEnabled) => {
                 this._isClickThrough = isEnabled;
             });
@@ -492,6 +503,7 @@ export class CheatingDaddyApp extends LitElement {
             ipcRenderer.removeAllListeners('new-response');
             ipcRenderer.removeAllListeners('update-response');
             ipcRenderer.removeAllListeners('update-status');
+            ipcRenderer.removeAllListeners('interviewer-question');
             ipcRenderer.removeAllListeners('click-through-toggled');
             ipcRenderer.removeAllListeners('reconnect-failed');
             ipcRenderer.removeAllListeners('whisper-downloading');
@@ -537,7 +549,11 @@ export class CheatingDaddyApp extends LitElement {
 
     addNewResponse(response) {
         const wasOnLatest = this.currentResponseIndex === this.responses.length - 1;
-        this.responses = [...this.responses, response];
+        const msg = typeof response === 'string'
+            ? { id: 'ai-' + Date.now() + '-' + Math.random(), type: 'ai', content: response, timestamp: Date.now() }
+            : { id: response.id || ('msg-' + Date.now() + '-' + Math.random()), timestamp: response.timestamp || Date.now(), ...response };
+
+        this.responses = [...this.responses, msg];
         if (wasOnLatest || this.currentResponseIndex === -1) {
             this.currentResponseIndex = this.responses.length - 1;
         }
@@ -546,10 +562,13 @@ export class CheatingDaddyApp extends LitElement {
     }
 
     updateCurrentResponse(response) {
-        if (this.responses.length > 0) {
-            this.responses = [...this.responses.slice(0, -1), response];
+        const content = typeof response === 'string' ? response : (response.content || '');
+        const lastIdx = this.responses.length - 1;
+        if (lastIdx >= 0 && this.responses[lastIdx].type === 'ai') {
+            const updated = { ...this.responses[lastIdx], content };
+            this.responses = [...this.responses.slice(0, lastIdx), updated];
         } else {
-            this.addNewResponse(response);
+            this.addNewResponse(typeof response === 'object' ? response : { type: 'ai', content, timestamp: Date.now() });
         }
         this.requestUpdate();
     }
@@ -702,13 +721,29 @@ export class CheatingDaddyApp extends LitElement {
     }
 
     async handleSendText(message) {
+        if (!message || !message.trim()) return;
+        this.addNewResponse({
+            id: 'user-' + Date.now(),
+            type: 'user',
+            content: message.trim(),
+            timestamp: Date.now(),
+        });
         const result = await window.cheatingDaddy.sendTextMessage(message);
         if (!result.success) {
             this.setStatus('Error sending message: ' + result.error);
         } else {
-            this.setStatus('Message sent...');
+            this.setStatus('Listening...');
             this._awaitingNewResponse = true;
         }
+    }
+
+    handleScreenAnalysisRequested() {
+        this.addNewResponse({
+            id: 'screen-' + Date.now(),
+            type: 'screen',
+            content: '📸 Analyzing current screen for interview context...',
+            timestamp: Date.now(),
+        });
     }
 
     handleResponseIndexChanged(e) {
@@ -797,8 +832,10 @@ export class CheatingDaddyApp extends LitElement {
                         .responses=${this.responses}
                         .currentResponseIndex=${this.currentResponseIndex}
                         .selectedProfile=${this.selectedProfile}
+                        .statusText=${this.statusText}
                         .onSendText=${msg => this.handleSendText(msg)}
                         .shouldAnimateResponse=${this.shouldAnimateResponse}
+                        @screen-analysis-requested=${() => this.handleScreenAnalysisRequested()}
                         @response-index-changed=${this.handleResponseIndexChanged}
                         @response-animation-complete=${() => {
                             this.shouldAnimateResponse = false;

@@ -10,8 +10,8 @@ const DEFAULT_CONFIG = {
     onboarded: false,
     layout: 'normal',
     geminiLiveModel: 'gemini-3.1-flash-live-preview',
-    groqModel: 'qwen/qwen3.6-27b',
-    groqImageModel: 'qwen/qwen3.6-27b',
+    groqModel: 'qwen/qwen3.8-27b',
+    groqImageModel: 'qwen/qwen3.8-27b',
     disableGroqThinking: true,
 };
 
@@ -166,7 +166,14 @@ function initializeStorage() {
 
 function getConfig() {
     const saved = readJsonFile(getConfigPath(), {});
-    return { ...DEFAULT_CONFIG, ...saved };
+    const config = { ...DEFAULT_CONFIG, ...saved };
+    if (!config.groqModel || config.groqModel.includes('qwen3.6') || config.groqModel.includes('llama-3.2') || config.groqModel.includes('llama-3.3')) {
+        config.groqModel = 'qwen/qwen3.8-27b';
+    }
+    if (!config.groqImageModel || config.groqImageModel.includes('qwen3.6') || config.groqImageModel.includes('llama-3.2') || config.groqImageModel.includes('llama-3.3')) {
+        config.groqImageModel = 'qwen/qwen3.8-27b';
+    }
+    return config;
 }
 
 function setConfig(config) {
@@ -201,8 +208,37 @@ function setApiKey(apiKey) {
     return setCredentials({ apiKey });
 }
 
+let currentGroqKeyIndex = 0;
+const groqKeyCooldowns = new Map();
+
 function getGroqApiKey() {
-    return getCredentials().groqApiKey || '';
+    const raw = getCredentials().groqApiKey || '';
+    if (!raw) return '';
+    // Support multiple keys separated by comma, semicolon or newline
+    const keys = raw.split(/[\n,;]+/).map(k => k.trim()).filter(Boolean);
+    if (keys.length <= 1) return keys[0] || '';
+
+    const now = Date.now();
+    // Round-robin: find next key not in cooldown
+    for (let i = 0; i < keys.length; i++) {
+        const idx = (currentGroqKeyIndex + i) % keys.length;
+        const candidate = keys[idx];
+        const cooldown = groqKeyCooldowns.get(candidate) || 0;
+        if (now > cooldown) {
+            currentGroqKeyIndex = (idx + 1) % keys.length;
+            return candidate;
+        }
+    }
+    // If all in cooldown, return least recently used
+    currentGroqKeyIndex = (currentGroqKeyIndex + 1) % keys.length;
+    return keys[currentGroqKeyIndex];
+}
+
+function markGroqKeyCooldown(key, durationMs = 60000) {
+    if (key) {
+        groqKeyCooldowns.set(key, Date.now() + durationMs);
+        console.log(`[Groq Key Pool] Key ${key.substring(0, 8)}... cooling down for ${durationMs / 1000}s`);
+    }
 }
 
 function setGroqApiKey(groqApiKey) {
@@ -357,17 +393,7 @@ function incrementCharUsage(provider, model, charCount) {
 }
 
 function getAvailableModel() {
-    const todayLimits = getTodayLimits();
-
-    // RPD limits: flash = 20, flash-lite = 20
-    // After both exhausted, fall back to flash (for paid API users)
-    if (todayLimits.flash.count < 20) {
-        return 'gemini-2.5-flash';
-    } else if (todayLimits.flashLite.count < 20) {
-        return 'gemini-2.5-flash-lite';
-    }
-
-    return 'gemini-2.5-flash'; // Default to flash for paid API users
+    return 'gemini-3.6-flash';
 }
 
 function getModelForToday() {
@@ -512,6 +538,7 @@ module.exports = {
     getApiKey,
     setApiKey,
     getGroqApiKey,
+    markGroqKeyCooldown,
     setGroqApiKey,
 
     // Preferences

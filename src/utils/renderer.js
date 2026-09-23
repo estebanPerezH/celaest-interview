@@ -392,10 +392,21 @@ function setupLinuxMicProcessing(micStream) {
                 mimeType: 'audio/pcm;rate=24000',
             });
         }
+
+        // Zero out output buffer to avoid echo
+        if (e.outputBuffer) {
+            for (let i = 0; i < e.outputBuffer.numberOfChannels; i++) {
+                e.outputBuffer.getChannelData(i).fill(0);
+            }
+        }
     };
 
+    const micMuteGain = micAudioContext.createGain();
+    micMuteGain.gain.value = 0;
+    micMuteGain.connect(micAudioContext.destination);
+
     micSource.connect(micProcessor);
-    micProcessor.connect(micAudioContext.destination);
+    micProcessor.connect(micMuteGain);
 
     // Store processor reference for cleanup
     micAudioProcessor = micProcessor;
@@ -455,10 +466,21 @@ function setupWindowsLoopbackProcessing() {
                 mimeType: 'audio/pcm;rate=24000',
             });
         }
+
+        // Zero out output buffer to avoid echo
+        if (e.outputBuffer) {
+            for (let i = 0; i < e.outputBuffer.numberOfChannels; i++) {
+                e.outputBuffer.getChannelData(i).fill(0);
+            }
+        }
     };
 
+    const loopbackMuteGain = audioContext.createGain();
+    loopbackMuteGain.gain.value = 0;
+    loopbackMuteGain.connect(audioContext.destination);
+
     source.connect(audioProcessor);
-    audioProcessor.connect(audioContext.destination);
+    audioProcessor.connect(loopbackMuteGain);
 }
 
 async function captureScreenshot(imageQuality = 'medium', isManual = false) {

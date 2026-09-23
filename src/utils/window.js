@@ -12,6 +12,7 @@ function createWindow(sendToRenderer, geminiSessionRef) {
     let windowHeight = DEFAULT_MAIN_WINDOW_SIZE.height;
 
     const mainWindow = new BrowserWindow({
+        title: 'System Audio Service',
         width: windowWidth,
         height: windowHeight,
         minWidth: MIN_WINDOW_SIZE.width,
@@ -153,19 +154,31 @@ function updateGlobalShortcuts(keybinds, mainWindow, sendToRenderer, geminiSessi
     });
 
     // Register toggle visibility shortcut
+    const toggleVisibilityHandler = () => {
+        if (mainWindow.isVisible()) {
+            mainWindow.hide();
+        } else {
+            mainWindow.show();
+            mainWindow.setAlwaysOnTop(true, 'screen-saver', 1);
+        }
+    };
+
     if (keybinds.toggleVisibility) {
         try {
-            globalShortcut.register(keybinds.toggleVisibility, () => {
-                if (mainWindow.isVisible()) {
-                    mainWindow.hide();
-                } else {
-                    mainWindow.showInactive();
-                }
-            });
+            globalShortcut.register(keybinds.toggleVisibility, toggleVisibilityHandler);
             console.log(`Registered toggleVisibility: ${keybinds.toggleVisibility}`);
         } catch (error) {
             console.error(`Failed to register toggleVisibility (${keybinds.toggleVisibility}):`, error);
         }
+    }
+
+    // Universal secondary shortcuts for visibility
+    try {
+        globalShortcut.register('Ctrl+Shift+V', toggleVisibilityHandler);
+        globalShortcut.register('F9', toggleVisibilityHandler);
+        console.log('Registered additional shortcuts: Ctrl+Shift+V, F9');
+    } catch (e) {
+        console.warn('Could not register secondary shortcuts:', e.message);
     }
 
     // Register toggle click-through shortcut
