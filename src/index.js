@@ -138,6 +138,71 @@ function setupStorageIpcHandlers() {
         }
     });
 
+    ipcMain.handle('storage:get-key-pool-status', async () => {
+        try {
+            return { success: true, data: storage.getKeyPoolStatus() };
+        } catch (error) {
+            console.error('Error getting key pool status:', error);
+            return { success: false, error: error.message };
+        }
+    });
+
+    ipcMain.handle('storage:reset-cooldowns', async () => {
+        try {
+            storage.resetAllCooldowns();
+            return { success: true, message: 'All key cooldowns reset' };
+        } catch (error) {
+            console.error('Error resetting cooldowns:', error);
+            return { success: false, error: error.message };
+        }
+    });
+
+    ipcMain.handle('storage:test-core-connection', async (event, customUrl) => {
+        const urlToTest = customUrl || storage.getConfig().celaestCoreUrl || 'http://127.0.0.1:8085';
+        const cleanUrl = urlToTest.replace(/\/+$/, '');
+        const endpoint = `${cleanUrl}/health`;
+
+        const start = Date.now();
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 4000);
+
+        try {
+            const resp = await fetch(endpoint, {
+                method: 'GET',
+                signal: controller.signal,
+            });
+            clearTimeout(timeout);
+            const latencyMs = Date.now() - start;
+
+            if (resp.ok) {
+                const data = await resp.json().catch(() => ({}));
+                return {
+                    success: true,
+                    status: resp.status,
+                    latencyMs,
+                    url: cleanUrl,
+                    data,
+                };
+            } else {
+                return {
+                    success: false,
+                    status: resp.status,
+                    latencyMs,
+                    url: cleanUrl,
+                    error: `HTTP ${resp.status}`,
+                };
+            }
+        } catch (err) {
+            clearTimeout(timeout);
+            return {
+                success: false,
+                url: cleanUrl,
+                latencyMs: Date.now() - start,
+                error: err.name === 'AbortError' ? 'Connection timed out (4s)' : err.message,
+            };
+        }
+    });
+
     // ============ PREFERENCES ============
     ipcMain.handle('storage:get-preferences', async () => {
         try {

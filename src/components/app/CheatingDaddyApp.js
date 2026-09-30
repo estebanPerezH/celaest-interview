@@ -472,14 +472,9 @@ export class CheatingDaddyApp extends LitElement {
             ipcRenderer.on('update-response', (_, response) => this.updateCurrentResponse(response));
             ipcRenderer.on('update-status', (_, status) => this.setStatus(status));
             ipcRenderer.on('interviewer-question', (_, data) => {
-                const content = typeof data === 'string' ? data : (data?.content || data?.text);
+                const content = typeof data === 'string' ? data : data?.content || data?.text;
                 if (content && content.trim()) {
-                    this.addNewResponse({
-                        id: 'interviewer-' + Date.now(),
-                        type: 'interviewer',
-                        content: content.trim(),
-                        timestamp: data?.timestamp || Date.now(),
-                    });
+                    this.updateInterviewerQuestion(content.trim(), data?.timestamp);
                 }
             });
             ipcRenderer.on('click-through-toggled', (_, isEnabled) => {
@@ -549,9 +544,10 @@ export class CheatingDaddyApp extends LitElement {
 
     addNewResponse(response) {
         const wasOnLatest = this.currentResponseIndex === this.responses.length - 1;
-        const msg = typeof response === 'string'
-            ? { id: 'ai-' + Date.now() + '-' + Math.random(), type: 'ai', content: response, timestamp: Date.now() }
-            : { id: response.id || ('msg-' + Date.now() + '-' + Math.random()), timestamp: response.timestamp || Date.now(), ...response };
+        const msg =
+            typeof response === 'string'
+                ? { id: 'ai-' + Date.now() + '-' + Math.random(), type: 'ai', content: response, timestamp: Date.now() }
+                : { id: response.id || 'msg-' + Date.now() + '-' + Math.random(), timestamp: response.timestamp || Date.now(), ...response };
 
         this.responses = [...this.responses, msg];
         if (wasOnLatest || this.currentResponseIndex === -1) {
@@ -562,13 +558,29 @@ export class CheatingDaddyApp extends LitElement {
     }
 
     updateCurrentResponse(response) {
-        const content = typeof response === 'string' ? response : (response.content || '');
+        const content = typeof response === 'string' ? response : response.content || '';
         const lastIdx = this.responses.length - 1;
         if (lastIdx >= 0 && this.responses[lastIdx].type === 'ai') {
             const updated = { ...this.responses[lastIdx], content };
             this.responses = [...this.responses.slice(0, lastIdx), updated];
         } else {
             this.addNewResponse(typeof response === 'object' ? response : { type: 'ai', content, timestamp: Date.now() });
+        }
+        this.requestUpdate();
+    }
+
+    updateInterviewerQuestion(text, timestamp) {
+        const lastIdx = this.responses.length - 1;
+        if (lastIdx >= 0 && this.responses[lastIdx].type === 'interviewer') {
+            const updated = { ...this.responses[lastIdx], content: text };
+            this.responses = [...this.responses.slice(0, lastIdx), updated];
+        } else {
+            this.addNewResponse({
+                id: 'interviewer-' + Date.now(),
+                type: 'interviewer',
+                content: text,
+                timestamp: timestamp || Date.now(),
+            });
         }
         this.requestUpdate();
     }

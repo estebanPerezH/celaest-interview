@@ -13,8 +13,9 @@ const DEFAULT_CONFIG = {
     groqModel: 'qwen/qwen3.8-27b',
     groqImageModel: 'qwen/qwen3.8-27b',
     disableGroqThinking: true,
-    celaestCoreUrl: 'https://celaest-core.onrender.com',
+    celaestCoreUrl: process.env.CELAEST_CORE_URL || 'https://celaest-core.onrender.com',
     useCelaestCore: true,
+    speedPriority: 'instant_stream', // 'instant_stream' (Groq SSE ~300ms) or 'core' (IA-Mesh first)
 };
 
 const DEFAULT_CREDENTIALS = {
@@ -169,13 +170,23 @@ function initializeStorage() {
 function getConfig() {
     const saved = readJsonFile(getConfigPath(), {});
     const config = { ...DEFAULT_CONFIG, ...saved };
-    if (!config.groqModel || config.groqModel.includes('qwen3.6') || config.groqModel.includes('llama-3.2') || config.groqModel.includes('llama-3.3')) {
+    if (
+        !config.groqModel ||
+        config.groqModel.includes('qwen3.6') ||
+        config.groqModel.includes('llama-3.2') ||
+        config.groqModel.includes('llama-3.3')
+    ) {
         config.groqModel = 'qwen/qwen3.8-27b';
     }
-    if (!config.groqImageModel || config.groqImageModel.includes('qwen3.6') || config.groqImageModel.includes('llama-3.2') || config.groqImageModel.includes('llama-3.3')) {
+    if (
+        !config.groqImageModel ||
+        config.groqImageModel.includes('qwen3.6') ||
+        config.groqImageModel.includes('llama-3.2') ||
+        config.groqImageModel.includes('llama-3.3')
+    ) {
         config.groqImageModel = 'qwen/qwen3.8-27b';
     }
-    if (!config.celaestCoreUrl || config.celaestCoreUrl === 'http://127.0.0.1:8085' || config.celaestCoreUrl === 'http://localhost:8085') {
+    if (!config.celaestCoreUrl) {
         config.celaestCoreUrl = 'https://celaest-core.onrender.com';
     }
     if (process.env.CELAEST_CORE_URL) {
@@ -208,25 +219,48 @@ function setCredentials(credentials) {
     return writeJsonFile(getCredentialsPath(), updated);
 }
 
-const KNOWN_GEMINI_POOL = [
-    'AIzaSyD39_swtG5IGiXNeJSRkmPY9cuBMFK49YQ',
-    'AIzaSyCxbIqzkpmiVTM_uhzyP5z4cgGPo4XBH50',
-    'AIzaSyDIXUwU55SG4z8MR0zvilolbhkONJU_g4w',
-];
+// Resilient default key pools sourced securely from environment or credentials storage
+function getKnownGeminiPool() {
+    const raw = process.env.GEMINI_KEYS_POOL || process.env.GEMINI_API_KEY || '';
+    return raw
+        ? raw
+              .split(/[\n,;]+/)
+              .map(cleanKey)
+              .filter(Boolean)
+        : [];
+}
+
+function getKnownGroqPool() {
+    const raw = process.env.GROQ_KEYS_POOL || process.env.GROQ_API_KEY || '';
+    return raw
+        ? raw
+              .split(/[\n,;]+/)
+              .map(cleanKey)
+              .filter(Boolean)
+        : [];
+}
 
 let currentGeminiKeyIndex = 0;
 const geminiKeyCooldowns = new Map();
 
+let currentGroqKeyIndex = 0;
+const groqKeyCooldowns = new Map();
+
+function cleanKey(k) {
+    if (!k || typeof k !== 'string') return '';
+    return k.replace(/['"`]/g, '').trim();
+}
+
 function getAllGeminiKeys() {
     const raw = getCredentials().apiKey || '';
-    const userKeys = raw ? raw.split(/[\n,;]+/).map(k => k.trim()).filter(Boolean) : [];
-    const merged = [...userKeys];
-    for (const k of KNOWN_GEMINI_POOL) {
-        if (!merged.includes(k)) {
-            merged.push(k);
-        }
-    }
-    return merged;
+    const userKeys = raw
+        ? raw
+              .split(/[\n,;]+/)
+              .map(cleanKey)
+              .filter(Boolean)
+        : [];
+    const pool = getKnownGeminiPool();
+    return Array.from(new Set([...userKeys, ...pool]));
 }
 
 function getApiKey() {
@@ -245,9 +279,17 @@ function getApiKey() {
             return candidate;
         }
     }
-    // If all in cooldown, return least recently used
-    currentGeminiKeyIndex = (currentGeminiKeyIndex + 1) % keys.length;
-    return keys[currentGeminiKeyIndex];
+    // If all in cooldown, return the one whose cooldown expires soonest
+    let bestKey = keys[0];
+    let earliestExpiry = Infinity;
+    for (const k of keys) {
+        const cooldown = geminiKeyCooldowns.get(k) || 0;
+        if (cooldown < earliestExpiry) {
+            earliestExpiry = cooldown;
+            bestKey = k;
+        }
+    }
+    return bestKey;
 }
 
 function markGeminiKeyCooldown(key, durationMs = 60000) {
@@ -269,15 +311,22 @@ function setApiKey(apiKey) {
     return setCredentials({ apiKey });
 }
 
-let currentGroqKeyIndex = 0;
-const groqKeyCooldowns = new Map();
+function getAllGroqKeys() {
+    const raw = getCredentials().groqApiKey || '';
+    const userKeys = raw
+        ? raw
+              .split(/[\n,;]+/)
+              .map(cleanKey)
+              .filter(Boolean)
+        : [];
+    const pool = getKnownGroqPool();
+    return Array.from(new Set([...userKeys, ...pool]));
+}
 
 function getGroqApiKey() {
-    const raw = getCredentials().groqApiKey || '';
-    if (!raw) return '';
-    // Support multiple keys separated by comma, semicolon or newline
-    const keys = raw.split(/[\n,;]+/).map(k => k.trim()).filter(Boolean);
-    if (keys.length <= 1) return keys[0] || '';
+    const keys = getAllGroqKeys();
+    if (keys.length === 0) return '';
+    if (keys.length === 1) return keys[0];
 
     const now = Date.now();
     // Round-robin: find next key not in cooldown
@@ -290,9 +339,17 @@ function getGroqApiKey() {
             return candidate;
         }
     }
-    // If all in cooldown, return least recently used
-    currentGroqKeyIndex = (currentGroqKeyIndex + 1) % keys.length;
-    return keys[currentGroqKeyIndex];
+    // If all in cooldown, pick the one that expires earliest
+    let bestKey = keys[0];
+    let earliestExpiry = Infinity;
+    for (const k of keys) {
+        const cooldown = groqKeyCooldowns.get(k) || 0;
+        if (cooldown < earliestExpiry) {
+            earliestExpiry = cooldown;
+            bestKey = k;
+        }
+    }
+    return bestKey;
 }
 
 function markGroqKeyCooldown(key, durationMs = 60000) {
@@ -302,8 +359,75 @@ function markGroqKeyCooldown(key, durationMs = 60000) {
     }
 }
 
+function rotateGroqKey() {
+    const keys = getAllGroqKeys();
+    if (keys.length > 1) {
+        currentGroqKeyIndex = (currentGroqKeyIndex + 1) % keys.length;
+    }
+    return getGroqApiKey();
+}
+
 function setGroqApiKey(groqApiKey) {
     return setCredentials({ groqApiKey });
+}
+
+function resetAllCooldowns() {
+    geminiKeyCooldowns.clear();
+    groqKeyCooldowns.clear();
+    console.log('[Key Pool] All key cooldowns have been cleared!');
+    return true;
+}
+
+function getKeyPoolStatus() {
+    const now = Date.now();
+    const config = getConfig();
+
+    const geminiKeys = getAllGeminiKeys();
+    const groqKeys = getAllGroqKeys();
+
+    const maskKey = k => {
+        if (!k || k.length < 8) return '****';
+        return `${k.substring(0, 6)}...${k.substring(k.length - 4)}`;
+    };
+
+    const geminiStatus = geminiKeys.map(k => {
+        const cooldown = geminiKeyCooldowns.get(k) || 0;
+        const inCooldown = now < cooldown;
+        return {
+            masked: maskKey(k),
+            inCooldown,
+            remainingSec: inCooldown ? Math.ceil((cooldown - now) / 1000) : 0,
+        };
+    });
+
+    const groqStatus = groqKeys.map(k => {
+        const cooldown = groqKeyCooldowns.get(k) || 0;
+        const inCooldown = now < cooldown;
+        return {
+            masked: maskKey(k),
+            inCooldown,
+            remainingSec: inCooldown ? Math.ceil((cooldown - now) / 1000) : 0,
+        };
+    });
+
+    return {
+        gemini: {
+            total: geminiKeys.length,
+            active: geminiStatus.filter(k => !k.inCooldown).length,
+            inCooldown: geminiStatus.filter(k => k.inCooldown).length,
+            keys: geminiStatus,
+        },
+        groq: {
+            total: groqKeys.length,
+            active: groqStatus.filter(k => !k.inCooldown).length,
+            inCooldown: groqStatus.filter(k => k.inCooldown).length,
+            keys: groqStatus,
+        },
+        core: {
+            url: config.celaestCoreUrl,
+            useCore: config.useCelaestCore !== false,
+        },
+    };
 }
 
 // ============ PREFERENCES ============
@@ -603,7 +727,11 @@ module.exports = {
     setApiKey,
     getGroqApiKey,
     markGroqKeyCooldown,
+    rotateGroqKey,
+    getAllGroqKeys,
     setGroqApiKey,
+    resetAllCooldowns,
+    getKeyPoolStatus,
 
     // Preferences
     getPreferences,

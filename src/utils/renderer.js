@@ -56,6 +56,16 @@ const storage = {
     async setGroqApiKey(groqApiKey) {
         return ipcRenderer.invoke('storage:set-groq-api-key', groqApiKey);
     },
+    async getKeyPoolStatus() {
+        const result = await ipcRenderer.invoke('storage:get-key-pool-status');
+        return result.success ? result.data : null;
+    },
+    async resetCooldowns() {
+        return ipcRenderer.invoke('storage:reset-cooldowns');
+    },
+    async testCoreConnection(url) {
+        return ipcRenderer.invoke('storage:test-core-connection', url);
+    },
 
     // Preferences
     async getPreferences() {
@@ -575,10 +585,13 @@ async function captureScreenshot(imageQuality = 'medium', isManual = false) {
     );
 }
 
-const MANUAL_SCREENSHOT_PROMPT = `Help me on this page, give me the answer no bs, complete answer.
-So if its a code question, give me the approach in few bullet points, then the entire code. Also if theres anything else i need to know, tell me.
-If its a question about the website, give me the answer no bs, complete answer.
-If its a mcq question, give me the answer no bs, complete answer.`;
+const MANUAL_SCREENSHOT_PROMPT = `Solve the technical challenge or question shown on this screen immediately.
+CRITICAL RULES:
+1. NEVER describe what you see on the screen or repeat the problem statement (do not say "The screen shows...", "The problem asks...", etc.).
+2. If it is a coding question: Give the approach in 2 short bullet points, then provide clean, working code with concise comments.
+3. If it is a multiple-choice question: State the correct answer option immediately in bold, followed by a 1-sentence reason.
+4. If it is a system design or architecture question: Give the exact spoken talking points in first person ("I would...").
+5. Output ONLY the answer without meta-commentary.`;
 
 async function captureManualScreenshot(imageQuality = null) {
     console.log('Manual screenshot triggered');

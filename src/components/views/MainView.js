@@ -317,6 +317,104 @@ export class MainView extends LitElement {
             }
         }
 
+        .pool-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            font-size: 11px;
+            padding: 2px 8px;
+            border-radius: 12px;
+            background: rgba(34, 197, 94, 0.12);
+            color: #22c55e;
+            border: 1px solid rgba(34, 197, 94, 0.25);
+            font-weight: 500;
+        }
+
+        .pool-badge.has-cooldown {
+            background: rgba(234, 179, 8, 0.12);
+            color: #eab308;
+            border-color: rgba(234, 179, 8, 0.25);
+        }
+
+        .pool-badge.empty {
+            background: rgba(239, 68, 68, 0.12);
+            color: #ef4444;
+            border-color: rgba(239, 68, 68, 0.25);
+        }
+
+        .pool-header-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 4px;
+        }
+
+        .btn-action-small {
+            background: var(--bg-elevated);
+            color: var(--text-primary);
+            border: 1px solid var(--border);
+            padding: 5px 10px;
+            border-radius: var(--radius-sm);
+            font-size: var(--font-size-xs);
+            cursor: pointer;
+            transition: all var(--transition);
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .btn-action-small:hover {
+            border-color: var(--accent);
+            background: rgba(255, 255, 255, 0.05);
+        }
+
+        .btn-action-small:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .preset-chip {
+            background: rgba(255, 255, 255, 0.04);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            padding: 2px 7px;
+            font-size: 10px;
+            color: var(--text-secondary);
+            cursor: pointer;
+            transition: all var(--transition);
+        }
+
+        .preset-chip:hover {
+            border-color: var(--accent);
+            color: var(--text-primary);
+        }
+
+        .test-status-msg {
+            font-size: 11px;
+            padding: 6px 10px;
+            border-radius: var(--radius-sm);
+            margin-top: 6px;
+            line-height: 1.4;
+        }
+
+        .test-status-msg.success {
+            background: rgba(34, 197, 94, 0.1);
+            color: #22c55e;
+            border: 1px solid rgba(34, 197, 94, 0.25);
+        }
+
+        .test-status-msg.error {
+            background: rgba(239, 68, 68, 0.1);
+            color: #ef4444;
+            border: 1px solid rgba(239, 68, 68, 0.25);
+        }
+
+        .test-status-msg.testing {
+            background: rgba(59, 130, 246, 0.1);
+            color: #60a5fa;
+            border: 1px solid rgba(59, 130, 246, 0.25);
+        }
+
         /* ── Start button ── */
 
         .start-button {
@@ -709,6 +807,12 @@ export class MainView extends LitElement {
         _useCustomLocalLlmModel: { state: true },
         _whisperModel: { state: true },
         _showLocalHelp: { state: true },
+        // CELAEST-CORE & Pool state
+        _useCelaestCore: { state: true },
+        _celaestCoreUrl: { state: true },
+        _keyPoolStatus: { state: true },
+        _coreTestStatus: { state: true },
+        _speedPriority: { state: true },
     };
 
     constructor() {
@@ -737,6 +841,11 @@ export class MainView extends LitElement {
         this._localLlmModel = 'unsloth/Qwen3.5-4B-GGUF:Q4_K_M';
         this._useCustomLocalLlmModel = false;
         this._whisperModel = 'tiny.en';
+        this._useCelaestCore = true;
+        this._celaestCoreUrl = 'http://127.0.0.1:8085';
+        this._keyPoolStatus = null;
+        this._coreTestStatus = null;
+        this._speedPriority = 'instant_stream';
 
         this._animId = null;
         this._time = 0;
@@ -762,15 +871,19 @@ export class MainView extends LitElement {
                 await cheatingDaddy.storage.updatePreference('providerMode', this._mode);
             }
 
-            // Load keys
+            // Load raw keys to preserve multiple keys in pool
             this._token = creds.cloudToken || '';
-            this._geminiKey = (await cheatingDaddy.storage.getApiKey().catch(() => '')) || '';
-            this._groqKey = (await cheatingDaddy.storage.getGroqApiKey().catch(() => '')) || '';
+            this._geminiKey = creds.apiKey || (await cheatingDaddy.storage.getApiKey().catch(() => '')) || '';
+            this._groqKey = creds.groqApiKey || (await cheatingDaddy.storage.getGroqApiKey().catch(() => '')) || '';
             this._openaiKey = creds.openaiKey || '';
             this._geminiLiveModel = config.geminiLiveModel || 'gemini-3.1-flash-live-preview';
             this._groqModel = config.groqModel || 'qwen/qwen3.8-27b';
             this._groqImageModel = config.groqImageModel || 'qwen/qwen3.8-27b';
             this._disableGroqThinking = config.disableGroqThinking === true;
+            this._useCelaestCore = config.useCelaestCore !== false;
+            this._celaestCoreUrl = config.celaestCoreUrl || 'http://127.0.0.1:8085';
+            this._speedPriority = config.speedPriority || 'instant_stream';
+            this._keyPoolStatus = await cheatingDaddy.storage.getKeyPoolStatus().catch(() => null);
 
             // Load local AI settings
             this._localLlmModel = prefs.localLlmModel || 'unsloth/Qwen3.5-4B-GGUF:Q4_K_M';
@@ -936,12 +1049,70 @@ export class MainView extends LitElement {
         this._geminiKey = val;
         this._keyError = false;
         await cheatingDaddy.storage.setApiKey(val);
+        await this._refreshPoolStatus();
         this.requestUpdate();
     }
 
     async _saveGroqKey(val) {
         this._groqKey = val;
         await cheatingDaddy.storage.setGroqApiKey(val);
+        await this._refreshPoolStatus();
+        this.requestUpdate();
+    }
+
+    async _saveUseCelaestCore(enabled) {
+        this._useCelaestCore = enabled;
+        await cheatingDaddy.storage.updateConfig('useCelaestCore', enabled);
+        await this._refreshPoolStatus();
+        this.requestUpdate();
+    }
+
+    async _saveCelaestCoreUrl(url) {
+        this._celaestCoreUrl = url;
+        await cheatingDaddy.storage.updateConfig('celaestCoreUrl', url);
+        this.requestUpdate();
+    }
+
+    async _saveSpeedPriority(val) {
+        this._speedPriority = val;
+        await cheatingDaddy.storage.updateConfig('speedPriority', val);
+        this.requestUpdate();
+    }
+
+    async _testCoreConnection() {
+        this._coreTestStatus = { testing: true, message: 'Testing connection to CELAEST-CORE...' };
+        this.requestUpdate();
+        try {
+            const res = await cheatingDaddy.storage.testCoreConnection(this._celaestCoreUrl);
+            if (res && res.success) {
+                this._coreTestStatus = {
+                    success: true,
+                    message: `Connected to ${res.url}! Latency: ${res.latencyMs}ms (HTTP ${res.status})`,
+                };
+            } else {
+                this._coreTestStatus = {
+                    success: false,
+                    message: `Unreachable: ${res?.error || 'No response'} (${res?.latencyMs || 0}ms)`,
+                };
+            }
+        } catch (err) {
+            this._coreTestStatus = {
+                success: false,
+                message: `Error: ${err.message}`,
+            };
+        }
+        await this._refreshPoolStatus();
+        this.requestUpdate();
+    }
+
+    async _resetCooldowns() {
+        await cheatingDaddy.storage.resetCooldowns().catch(() => {});
+        await this._refreshPoolStatus();
+        this.requestUpdate();
+    }
+
+    async _refreshPoolStatus() {
+        this._keyPoolStatus = await cheatingDaddy.storage.getKeyPoolStatus().catch(() => null);
         this.requestUpdate();
     }
 
@@ -1157,26 +1328,157 @@ export class MainView extends LitElement {
     }
 
     _renderByokMode() {
+        const gemActive = this._keyPoolStatus?.gemini?.active ?? (this._geminiKey ? 1 : 0);
+        const gemTotal = this._keyPoolStatus?.gemini?.total ?? (this._geminiKey ? 1 : 0);
+        const gemCooldown = this._keyPoolStatus?.gemini?.inCooldown ?? 0;
+
+        const groqActive = this._keyPoolStatus?.groq?.active ?? (this._groqKey ? 1 : 0);
+        const groqTotal = this._keyPoolStatus?.groq?.total ?? (this._groqKey ? 1 : 0);
+        const groqCooldown = this._keyPoolStatus?.groq?.inCooldown ?? 0;
+
         return html`
-            <details class="config-section">
+            <!-- Pool Status Bar -->
+            <div
+                style="display: flex; align-items: center; justify-content: space-between; padding: 8px 12px; margin-bottom: 12px; background: rgba(255, 255, 255, 0.03); border: 1px solid var(--border); border-radius: var(--radius-sm);"
+            >
+                <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+                    <span class="pool-badge ${gemCooldown > 0 ? 'has-cooldown' : gemActive > 0 ? '' : 'empty'}">
+                        <span>●</span> Gemini: ${gemActive}/${gemTotal}
+                    </span>
+                    <span class="pool-badge ${groqCooldown > 0 ? 'has-cooldown' : groqActive > 0 ? '' : 'empty'}">
+                        <span>●</span> Groq: ${groqActive}/${groqTotal}
+                    </span>
+                </div>
+                <button class="btn-action-small" title="Reset any throttled or rate-limited keys" @click=${() => this._resetCooldowns()}>
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67" />
+                    </svg>
+                    Reset Cooldowns
+                </button>
+            </div>
+
+            <!-- Priority / Latency Engine Selector -->
+            <div
+                class="form-group"
+                style="margin-bottom: 12px; background: rgba(255, 255, 255, 0.03); border: 1px solid var(--color-border); border-radius: 8px; padding: 10px;"
+            >
+                <div class="pool-header-row" style="margin-bottom: 8px;">
+                    <label class="form-label" style="margin: 0; font-weight: 600; display: flex; align-items: center; gap: 6px;">
+                        <span>Response Speed Engine</span>
+                    </label>
+                    <span style="font-size: 10px; color: var(--color-text-secondary); text-transform: uppercase; letter-spacing: 0.5px;">
+                        Zero-Silence Latency
+                    </span>
+                </div>
+                <div style="display: flex; gap: 8px;">
+                    <button
+                        type="button"
+                        class="preset-chip ${this._speedPriority === 'instant_stream' ? 'active' : ''}"
+                        style="flex: 1; padding: 7px 10px; font-weight: 600; text-align: center; border: 1px solid ${this._speedPriority === 'instant_stream' ? '#6366f1' : 'var(--color-border)'}; background: ${this._speedPriority === 'instant_stream' ? 'rgba(99, 102, 241, 0.2)' : 'rgba(255, 255, 255, 0.04)'}; color: ${this._speedPriority === 'instant_stream' ? '#a5b4fc' : 'var(--color-text-secondary)'}; border-radius: 6px; cursor: pointer; transition: all 0.2s;"
+                        @click=${() => this._saveSpeedPriority('instant_stream')}
+                    >
+                        ⚡ Instant Stream (~300ms)
+                    </button>
+                    <button
+                        type="button"
+                        class="preset-chip ${this._speedPriority === 'core' ? 'active' : ''}"
+                        style="flex: 1; padding: 7px 10px; font-weight: 600; text-align: center; border: 1px solid ${this._speedPriority === 'core' ? '#6366f1' : 'var(--color-border)'}; background: ${this._speedPriority === 'core' ? 'rgba(99, 102, 241, 0.2)' : 'rgba(255, 255, 255, 0.04)'}; color: ${this._speedPriority === 'core' ? '#a5b4fc' : 'var(--color-text-secondary)'}; border-radius: 6px; cursor: pointer; transition: all 0.2s;"
+                        @click=${() => this._saveSpeedPriority('core')}
+                    >
+                        🏛️ CELAEST-CORE First
+                    </button>
+                </div>
+                <div class="form-hint" style="margin-top: 6px; font-size: 11px;">
+                    ${
+                        this._speedPriority === 'instant_stream'
+                            ? '⚡ Tokens stream to screen word-by-word in ~300ms so you can speak immediately without dead silence.'
+                            : '🏛️ Queries local/remote IA-Mesh first (1.5s timeout) with fallback to Groq streaming.'
+                    }
+                </div>
+            </div>
+
+            <!-- Section 1: CELAEST-CORE (IA-Mesh) -->
+            <details class="config-section" ?open=${this._useCelaestCore}>
                 <summary class="config-summary">
                     <span class="config-summary-text">
-                        <span class="config-summary-title">Transcription</span>
-                        <span class="config-summary-description">Gemini Live connection</span>
+                        <span class="config-summary-title">CELAEST-CORE (IA-Mesh)</span>
+                        <span class="config-summary-description">Tier 1 orchestrator with multi-key mesh & Redis cache</span>
+                    </span>
+                    ${this._renderConfigChevron()}
+                </summary>
+                <div class="config-content">
+                    <label class="config-checkbox">
+                        <input type="checkbox" .checked=${this._useCelaestCore} @change=${e => this._saveUseCelaestCore(e.target.checked)} />
+                        <span class="config-checkbox-text">
+                            <span class="config-summary-title">Use CELAEST-CORE as Tier 1</span>
+                            <span class="config-summary-description">Queries the local/cloud mesh first for instant answers</span>
+                        </span>
+                    </label>
+
+                    <div class="form-group" style=${this._useCelaestCore ? '' : 'opacity: 0.5; pointer-events: none;'}>
+                        <div class="pool-header-row">
+                            <label class="form-label">Core Endpoint URL</label>
+                            <div style="display: flex; gap: 6px;">
+                                <span class="preset-chip" @click=${() => this._saveCelaestCoreUrl('http://127.0.0.1:8085')}>Local 8085</span>
+                                <span class="preset-chip" @click=${() => this._saveCelaestCoreUrl('https://celaest-core.onrender.com')}
+                                    >Render Cloud</span
+                                >
+                            </div>
+                        </div>
+                        <input
+                            type="text"
+                            placeholder="http://127.0.0.1:8085"
+                            .value=${this._celaestCoreUrl}
+                            @input=${e => this._saveCelaestCoreUrl(e.target.value.trim())}
+                        />
+                        <div style="display: flex; gap: 8px; margin-top: 8px; align-items: center;">
+                            <button class="btn-action-small" @click=${() => this._testCoreConnection()} ?disabled=${this._coreTestStatus?.testing}>
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <circle cx="12" cy="12" r="10" />
+                                    <polygon points="10 8 16 12 10 16 10 8" />
+                                </svg>
+                                ${this._coreTestStatus?.testing ? 'Testing...' : 'Test Core Connection'}
+                            </button>
+                        </div>
+                        ${
+                            this._coreTestStatus
+                                ? html`<div
+                                      class="test-status-msg ${this._coreTestStatus.testing ? 'testing' : this._coreTestStatus.success ? 'success' : 'error'}"
+                                  >
+                                      ${this._coreTestStatus.message}
+                                  </div>`
+                                : ''
+                        }
+                    </div>
+                </div>
+            </details>
+
+            <!-- Section 2: Gemini Live & Pool -->
+            <details class="config-section" open>
+                <summary class="config-summary">
+                    <span class="config-summary-text">
+                        <span class="config-summary-title">Transcription & Gemini Pool</span>
+                        <span class="config-summary-description">Gemini Live stream and fallback answering pool</span>
                     </span>
                     ${this._renderConfigChevron()}
                 </summary>
                 <div class="config-content">
                     <div class="form-group">
-                        <label class="form-label">Gemini API Key</label>
-                        <input
-                            type="password"
-                            placeholder="Required"
+                        <div class="pool-header-row">
+                            <label class="form-label">Gemini API Key(s)</label>
+                            <span class="pool-badge ${gemCooldown > 0 ? 'has-cooldown' : gemActive > 0 ? '' : 'empty'}">
+                                ${gemActive} active / ${gemTotal} total
+                            </span>
+                        </div>
+                        <textarea
+                            placeholder="Enter Gemini API key (or multiple keys separated by newlines or commas)"
                             .value=${this._geminiKey}
                             @input=${e => this._saveGeminiKey(e.target.value)}
                             class=${this._keyError ? 'error' : ''}
-                        />
-                        <div class="form-hint">
+                            style="min-height: 60px; font-family: monospace; font-size: 11px;"
+                        ></textarea>
+                        <div class="form-hint" style="display: flex; justify-content: space-between; align-items: center;">
+                            <span>Support multi-key pool (comma or newline separated)</span>
                             <span class="link" @click=${() => this.onExternalLink('https://aistudio.google.com/apikey')}>Get Gemini key</span>
                         </div>
                     </div>
@@ -1188,19 +1490,31 @@ export class MainView extends LitElement {
                 </div>
             </details>
 
-            <details class="config-section">
+            <!-- Section 3: Groq Pool & Models -->
+            <details class="config-section" open>
                 <summary class="config-summary">
                     <span class="config-summary-text">
-                        <span class="config-summary-title">AI responses</span>
-                        <span class="config-summary-description">Groq key and response model</span>
+                        <span class="config-summary-title">Groq Multi-Key Pool & Models</span>
+                        <span class="config-summary-description">Ultra-fast response models with auto-rotation on 429</span>
                     </span>
                     ${this._renderConfigChevron()}
                 </summary>
                 <div class="config-content">
                     <div class="form-group">
-                        <label class="form-label">Groq API Key</label>
-                        <input type="password" placeholder="Optional" .value=${this._groqKey} @input=${e => this._saveGroqKey(e.target.value)} />
-                        <div class="form-hint">
+                        <div class="pool-header-row">
+                            <label class="form-label">Groq API Key(s)</label>
+                            <span class="pool-badge ${groqCooldown > 0 ? 'has-cooldown' : groqActive > 0 ? '' : 'empty'}">
+                                ${groqActive} active / ${groqTotal} total
+                            </span>
+                        </div>
+                        <textarea
+                            placeholder="Enter Groq API key (or multiple keys separated by newlines or commas)"
+                            .value=${this._groqKey}
+                            @input=${e => this._saveGroqKey(e.target.value)}
+                            style="min-height: 60px; font-family: monospace; font-size: 11px;"
+                        ></textarea>
+                        <div class="form-hint" style="display: flex; justify-content: space-between; align-items: center;">
+                            <span>Support multi-key pool (auto-failover on rate limits)</span>
                             <span class="link" @click=${() => this.onExternalLink('https://console.groq.com/keys')}>Get Groq key</span>
                         </div>
                     </div>
@@ -1228,14 +1542,13 @@ export class MainView extends LitElement {
                     </label>
 
                     <div class="config-note">
-                        If the Groq API key is empty, Gemini Live is used for answers instead. Its answer quality may be lower.
+                        Resilient Cascade Active: CELAEST-CORE (Tier 1) ➔ Groq Multi-Key Pool (Tier 2) ➔ Gemini HTTP Pool (Tier 3). If any key hits a
+                        quota or rate limit, it automatically rotates to the next available key without pausing the interview.
                     </div>
                 </div>
             </details>
 
             ${this._renderStartButton()} ${this._renderDivider()}
-
-            <!-- Cloud promo intentionally removed from the active UI. -->
 
             <div class="mode-links">
                 <button class="mode-link" @click=${() => this._saveMode('local')}>Use local AI</button>
