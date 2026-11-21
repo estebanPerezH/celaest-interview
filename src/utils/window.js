@@ -306,6 +306,86 @@ function updateGlobalShortcuts(keybinds, mainWindow, sendToRenderer, geminiSessi
 }
 
 function setupWindowIpcHandlers(mainWindow, sendToRenderer, geminiSessionRef) {
+    let savedNormalBounds = null;
+    let isEyeLockDocked = false;
+
+    ipcMain.handle('window:set-eyelock-dock', (event, options = {}) => {
+        try {
+            if (!mainWindow || mainWindow.isDestroyed()) {
+                return { success: false, error: 'Window has been destroyed' };
+            }
+
+            const shouldDock = Boolean(options.docked);
+            const currentBounds = mainWindow.getBounds();
+            const activeDisplay = screen.getDisplayMatching(currentBounds) || screen.getPrimaryDisplay();
+
+            if (shouldDock) {
+                if (!isEyeLockDocked) {
+                    savedNormalBounds = { ...currentBounds };
+                }
+                isEyeLockDocked = true;
+
+                const targetWidth = Math.max(280, Math.min(720, Number(options.width) || 390));
+                const targetHeight = Math.max(150, Math.min(540, Number(options.height) || 260));
+
+                mainWindow.setMinimumSize(280, 150);
+
+                const x = Math.round(activeDisplay.bounds.x + (activeDisplay.bounds.width - targetWidth) / 2);
+                const y = activeDisplay.bounds.y + 4;
+
+                mainWindow.setBounds({ x, y, width: targetWidth, height: targetHeight }, true);
+                if (process.platform === 'win32') {
+                    mainWindow.setAlwaysOnTop(true, 'screen-saver', 1);
+                } else {
+                    mainWindow.setAlwaysOnTop(true);
+                }
+            } else {
+                isEyeLockDocked = false;
+                mainWindow.setMinimumSize(MIN_WINDOW_SIZE.width, MIN_WINDOW_SIZE.height);
+
+                if (savedNormalBounds && savedNormalBounds.width >= MIN_WINDOW_SIZE.width) {
+                    mainWindow.setBounds(savedNormalBounds, true);
+                } else {
+                    const width = DEFAULT_MAIN_WINDOW_SIZE.width;
+                    const height = DEFAULT_MAIN_WINDOW_SIZE.height;
+                    const x = Math.round(activeDisplay.bounds.x + (activeDisplay.bounds.width - width) / 2);
+                    const y = Math.round(activeDisplay.bounds.y + (activeDisplay.bounds.height - height) / 2);
+                    mainWindow.setBounds({ x, y, width, height }, true);
+                }
+            }
+
+            return {
+                success: true,
+                docked: isEyeLockDocked,
+                bounds: mainWindow.getBounds(),
+            };
+        } catch (error) {
+            console.error('Error setting eyelock dock:', error);
+            return { success: false, error: error.message };
+        }
+    });
+
+    ipcMain.handle('window:capture-slide-base64', async () => {
+        try {
+            const { desktopCapturer } = require('electron');
+            const sources = await desktopCapturer.getSources({
+                types: ['screen'],
+                thumbnailSize: { width: 1280, height: 720 },
+            });
+            if (!sources || sources.length === 0) {
+                return { success: false, error: 'No screen source found' };
+            }
+            const jpegBuffer = sources[0].thumbnail.toJPEG(72);
+            return {
+                success: true,
+                data: jpegBuffer.toString('base64'),
+            };
+        } catch (error) {
+            console.error('Error capturing slide thumbnail:', error);
+            return { success: false, error: error.message };
+        }
+    });
+
     ipcMain.on('view-changed', (event, view) => {
         if (!mainWindow.isDestroyed()) {
             const isLiveMode = view === 'assistant';

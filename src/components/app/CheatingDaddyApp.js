@@ -7,6 +7,7 @@ import { AssistantView } from '../views/AssistantView.js';
 import { OnboardingView } from '../views/OnboardingView.js';
 import { AICustomizeView } from '../views/AICustomizeView.js';
 import { FeedbackView } from '../views/FeedbackView.js';
+import { EyeLockPrompter } from '../views/EyeLockPrompter.js';
 
 export class CheatingDaddyApp extends LitElement {
     static styles = css`
@@ -380,6 +381,7 @@ export class CheatingDaddyApp extends LitElement {
         selectedScreenshotInterval: { type: String },
         selectedImageQuality: { type: String },
         layoutMode: { type: String },
+        _eyeLockDocked: { type: Boolean, state: true },
         _viewInstances: { type: Object, state: true },
         _isClickThrough: { state: true },
         _awaitingNewResponse: { state: true },
@@ -402,6 +404,7 @@ export class CheatingDaddyApp extends LitElement {
         this.selectedScreenshotInterval = '5';
         this.selectedImageQuality = 'medium';
         this.layoutMode = 'normal';
+        this._eyeLockDocked = false;
         this.responses = [];
         this.currentResponseIndex = -1;
         this._viewInstances = new Map();
@@ -588,6 +591,11 @@ export class CheatingDaddyApp extends LitElement {
     // ── Navigation ──
 
     navigate(view) {
+        if (this._eyeLockDocked && view !== 'exposicion' && window.require) {
+            const { ipcRenderer } = window.require('electron');
+            ipcRenderer.invoke('window:set-eyelock-dock', { docked: false }).catch(() => {});
+            this._eyeLockDocked = false;
+        }
         this.currentView = view;
         this.requestUpdate();
     }
@@ -838,6 +846,18 @@ export class CheatingDaddyApp extends LitElement {
             case 'history':
                 return html`<history-view></history-view>`;
 
+            case 'exposicion':
+                return html`
+                    <eyelock-prompter
+                        .responses=${this.responses}
+                        .selectedProfile=${this.selectedProfile}
+                        @eyelock-dock-changed=${e => {
+                            this._eyeLockDocked = Boolean(e.detail?.docked);
+                            this.requestUpdate();
+                        }}
+                    ></eyelock-prompter>
+                `;
+
             case 'assistant':
                 return html`
                     <assistant-view
@@ -873,6 +893,16 @@ export class CheatingDaddyApp extends LitElement {
                             d="m19 8.71l-5.333-4.148a2.666 2.666 0 0 0-3.274 0L5.059 8.71a2.67 2.67 0 0 0-1.029 2.105v7.2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7.2c0-.823-.38-1.6-1.03-2.105"
                         />
                         <path d="M16 15c-2.21 1.333-5.792 1.333-8 0" />
+                    </g>
+                </svg>`,
+            },
+            {
+                id: 'exposicion',
+                label: 'Exposición',
+                icon: html`<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24">
+                    <g fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2">
+                        <path d="M2 12s3-7 10-7s10 7 10 7s-3 7-10 7s-10-7-10-7Z" />
+                        <circle cx="12" cy="12" r="3" />
                     </g>
                 </svg>`,
             },
@@ -937,7 +967,7 @@ export class CheatingDaddyApp extends LitElement {
         ];
 
         return html`
-            <div class="sidebar ${this._isLiveMode() ? 'hidden' : ''}">
+            <div class="sidebar ${this._isLiveMode() || this._eyeLockDocked ? 'hidden' : ''}">
                 <div class="sidebar-brand">
                     <h1>Cheating Daddy</h1>
                 </div>
@@ -1022,10 +1052,11 @@ export class CheatingDaddyApp extends LitElement {
         }
 
         const isLive = this._isLiveMode();
+        const isCompactView = isLive || this.currentView === 'exposicion';
 
         return html`
             <div class="app-shell">
-                <div class="top-drag-bar ${isLive ? 'hidden' : ''}">
+                <div class="top-drag-bar ${isLive || this._eyeLockDocked ? 'hidden' : ''}">
                     <div class="traffic-lights">
                         <button class="traffic-light close" @click=${() => this.handleClose()} title="Close"></button>
                         <button class="traffic-light minimize" @click=${() => this._handleMinimize()} title="Minimize"></button>
@@ -1036,7 +1067,7 @@ export class CheatingDaddyApp extends LitElement {
                 ${this.renderSidebar()}
                 <div class="content">
                     ${isLive ? this.renderLiveBar() : ''}
-                    <div class="content-inner ${isLive ? 'live' : ''}">${this.renderCurrentView()}</div>
+                    <div class="content-inner ${isCompactView ? 'live' : ''}">${this.renderCurrentView()}</div>
                 </div>
             </div>
         `;
